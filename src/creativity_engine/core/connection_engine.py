@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
 import re
 from typing import TypedDict
 
@@ -28,6 +29,7 @@ class ConnectionState(TypedDict):
     diverged_ideas: list[Idea]
     linked_ideas: list[Idea]
     relaxed_ideas: list[Idea]
+    serendipity_ideas: list[Idea]
     all_ideas: list[Idea]
     scored_ideas: list[Idea]
     idea_set: IdeaSet
@@ -199,7 +201,74 @@ class ConstraintRelaxer:
 
 
 # ──────────────────────────────────────────────
-# 4. Novelty Scorer
+# 4. Serendipity Generator
+# ──────────────────────────────────────────────
+
+# serendipity=0이면 완전 skip. 값이 높을수록 더 무관한 도메인에서 강제 연결.
+_SERENDIPITY_DOMAINS = [
+    "요리", "음악", "고고학", "우주항공", "패션", "원예", "마술", "스포츠",
+    "신화", "지질학", "해양생물", "건축", "철학", "만화", "의학", "종교",
+    "경제학", "수학", "영화", "곤충학", "기후학", "언어학", "무용", "항해",
+]
+
+_SERENDIPITY_SYSTEM = """\
+ROLE: 우연적 아이디어 생성기
+ABBREV: sd=source_domains conn=connections
+
+무관해 보이는 도메인을 문제에 강제 연결해 예상치 못한 아이디어를 생성.
+논리적 연결보다 직관적·우연적 연상을 우선. 실현가능성 판단 금지.
+
+<out>JSON 배열만
+[{{"content":"...","rationale":"...","source_domains":["랜덤도메인","문제도메인"],"connections":["연결개념"]}}]</out>"""
+
+_SERENDIPITY_USER = """\
+goal:{goal}|const:{constraints}
+random_domains:{random_domains}
+serendipity:{serendipity}
+
+→위 랜덤 도메인을 문제에 강제 연결해 {n}개 아이디어 JSON"""
+
+
+class SerendipityGenerator:
+    """
+    우연 자극 기반 아이디어 생성기.
+    serendipity=0.0이면 즉시 빈 리스트 반환.
+    serendipity가 높을수록:
+      - 선택 도메인 수 증가 (무관한 도메인 더 많이)
+      - 생성 아이디어 수 증가
+    """
+
+    def run(self, bundle: InputBundle) -> list[Idea]:
+        serendipity = bundle.problem.serendipity
+        if serendipity <= 0.0:
+            return []
+
+        # serendipity 강도에 따라 도메인 수·아이디어 수 결정
+        domain_count = max(1, round(serendipity * 4))   # 0.25→1, 0.5→2, 1.0→4
+        n = max(1, round(serendipity * bundle.problem.divergence_n * 0.4))
+
+        random_domains = random.sample(_SERENDIPITY_DOMAINS, min(domain_count, len(_SERENDIPITY_DOMAINS)))
+
+        system = _SERENDIPITY_SYSTEM
+        user = _SERENDIPITY_USER.format(
+            goal=bundle.problem.goal,
+            constraints=", ".join(bundle.problem.constraints) or "없음",
+            random_domains=", ".join(random_domains),
+            serendipity=serendipity,
+            n=n,
+        )
+        text = _call_claude(system, user)
+        raw = _parse_ideas_json(text)
+        ideas = [Idea(**item) for item in raw if isinstance(item, dict)]
+        logger.info(
+            "SerendipityGenerator(strength=%.2f) domains=%s → %d ideas",
+            serendipity, random_domains, len(ideas),
+        )
+        return ideas
+
+
+# ──────────────────────────────────────────────
+# 5. Novelty Scorer
 # ──────────────────────────────────────────────
 
 _SCORER_SYSTEM = """\
@@ -326,6 +395,7 @@ class ConvergenceRanker:
 _divergence_gen = DivergenceGenerator()
 _cross_linker = CrossDomainLinker()
 _constraint_relaxer = ConstraintRelaxer()
+_serendipity_gen = SerendipityGenerator()
 _novelty_scorer = NoveltyScorer()
 
 
@@ -351,11 +421,18 @@ def relax_node(state: ConnectionState) -> dict:
     return {"relaxed_ideas": ideas}
 
 
+def serendipity_node(state: ConnectionState) -> dict:
+    bundle = state["bundle"]
+    ideas = _serendipity_gen.run(bundle)
+    return {"serendipity_ideas": ideas}
+
+
 def merge_node(state: ConnectionState) -> dict:
     all_ideas = (
         state.get("diverged_ideas", [])
         + state.get("linked_ideas", [])
         + state.get("relaxed_ideas", [])
+        + state.get("serendipity_ideas", [])
     )
     logger.info("merge_node: total %d ideas", len(all_ideas))
     return {"all_ideas": all_ideas}
@@ -403,6 +480,7 @@ def build_connection_graph():
     graph.add_node("diverge", diverge_node)
     graph.add_node("cross_link", cross_link_node)
     graph.add_node("relax", relax_node)
+    graph.add_node("serendipity", serendipity_node)
     graph.add_node("merge", merge_node)
     graph.add_node("score", score_node)
     graph.add_node("rank", rank_node)
@@ -410,8 +488,10 @@ def build_connection_graph():
     graph.set_entry_point("diverge")
     graph.add_edge("diverge", "cross_link")
     graph.add_edge("diverge", "relax")
+    graph.add_edge("diverge", "serendipity")  # serendipity=0이면 내부에서 skip
     graph.add_edge("cross_link", "merge")
     graph.add_edge("relax", "merge")
+    graph.add_edge("serendipity", "merge")
     graph.add_edge("merge", "score")
     graph.add_edge("score", "rank")
     graph.add_edge("rank", END)
@@ -440,6 +520,7 @@ class ConnectionEngine:
             "diverged_ideas": [],
             "linked_ideas": [],
             "relaxed_ideas": [],
+            "serendipity_ideas": [],
             "all_ideas": [],
             "scored_ideas": [],
             "idea_set": IdeaSet(problem=bundle.problem),

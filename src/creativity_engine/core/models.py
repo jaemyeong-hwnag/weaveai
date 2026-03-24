@@ -28,6 +28,16 @@ class CreativityProblem(BaseModel):
     divergence_n: int = Field(default=10, description="Divergence Generator가 생성할 아이디어 수")
     top_k: int = Field(default=3, description="Convergence Ranker가 최종 선별할 아이디어 수")
     max_reflection_rounds: int = Field(default=2, description="Reflector가 재시도하는 최대 횟수")
+    serendipity: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "우연 요소 강도 0.0~1.0. "
+            "0.0=비활성, 0.3=약한 자극, 0.7=강한 무관 도메인 연결, 1.0=최대 우연성. "
+            "높을수록 문제와 무관한 랜덤 도메인에서 아이디어를 강제 생성함."
+        ),
+    )
 
 
 class Idea(BaseModel):

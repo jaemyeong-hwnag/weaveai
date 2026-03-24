@@ -19,6 +19,7 @@ class GeneralAdapter(DomainAdapter):
             divergence_n=raw.get("divergence_n", 10),
             top_k=raw.get("top_k", 3),
             max_reflection_rounds=raw.get("max_reflection_rounds", 2),
+            serendipity=raw.get("serendipity", 0.0),
         )
 
     def render_solution(self, solution: Solution) -> dict[str, Any]:
