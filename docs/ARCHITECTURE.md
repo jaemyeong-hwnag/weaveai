@@ -148,13 +148,16 @@ EngineConfig
 BaseLLMClient (ABC)
 └── call(system, user, max_tokens) → str
 
-ClaudeClient(BaseLLMClient)   ← 기본 구현체
-MyOpenAIClient(BaseLLMClient) ← 사용자 구현
-MyLocalLLM(BaseLLMClient)     ← 로컬 모델
+ClaudeClient(BaseLLMClient)    ← 기본 구현체 (anthropic)
+OpenAIClient(BaseLLMClient)    ← OpenAI GPT (선택: pip install openai)
+GeminiClient(BaseLLMClient)    ← Google Gemini (선택: pip install google-genai)
+OllamaClient(BaseLLMClient)    ← Ollama 로컬 LLM (선택: pip install ollama)
+CustomClient(BaseLLMClient)    ← 사용자 정의 구현
 ```
 
 모든 제너레이터와 OutputEngine 컴포넌트는 `BaseLLMClient`를 통해서만 LLM을 호출합니다.
-`anthropic` 라이브러리에 직접 의존하는 코드는 `ClaudeClient` 하나뿐입니다.
+각 공급자 SDK에 직접 의존하는 코드는 해당 클라이언트 파일 하나뿐입니다.
+OpenAI/Gemini/Ollama는 선택 의존성으로 패키지가 없어도 임포트 시 에러가 발생하지 않습니다.
 
 ---
 

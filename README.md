@@ -28,9 +28,22 @@
 ## 설치
 
 ```bash
+# 기본 설치 (Anthropic Claude 포함)
+pip install git+https://github.com/jaemyeong-hwnag/weaveai.git
+
+# 선택 LLM 공급자 포함
+pip install "git+https://github.com/jaemyeong-hwnag/weaveai.git[openai]"   # OpenAI GPT
+pip install "git+https://github.com/jaemyeong-hwnag/weaveai.git[gemini]"   # Google Gemini
+pip install "git+https://github.com/jaemyeong-hwnag/weaveai.git[ollama]"   # Ollama 로컬
+pip install "git+https://github.com/jaemyeong-hwnag/weaveai.git[all]"      # 전체
+```
+
+또는 로컬 개발:
+
+```bash
 git clone https://github.com/jaemyeong-hwnag/weaveai.git
 cd weaveai
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
 ### 환경변수
@@ -41,8 +54,10 @@ cp .env.example .env
 ```
 
 ```env
-ANTHROPIC_API_KEY=sk-ant-...
-TAVILY_API_KEY=tvly-...   # 웹 검색 사용 시 (선택)
+ANTHROPIC_API_KEY=sk-ant-...   # Claude 사용 시
+OPENAI_API_KEY=sk-...          # OpenAI 사용 시
+GEMINI_API_KEY=...             # Gemini 사용 시
+TAVILY_API_KEY=tvly-...        # 웹 검색 사용 시 (선택)
 ```
 
 ---
@@ -177,15 +192,62 @@ engine = CreativityEngine(adapter=LegalAdapter(), config=config)
 
 ## LLM 공급자 교체
 
+기본값은 Claude(Anthropic)이며, 아래 내장 클라이언트로 즉시 교체 가능합니다.
+
+### OpenAI (GPT-4o 등)
+
+```bash
+pip install "creativity-engine[openai]"
+```
+
+```python
+from creativity_engine.llm.openai import OpenAIClient
+from creativity_engine import CreativityEngine, EngineConfig
+
+config = EngineConfig(llm_client=OpenAIClient(model="gpt-4o"))
+engine = CreativityEngine(config=config)
+```
+
+### Google Gemini
+
+```bash
+pip install "creativity-engine[gemini]"
+```
+
+```python
+from creativity_engine.llm.gemini import GeminiClient
+from creativity_engine import CreativityEngine, EngineConfig
+
+config = EngineConfig(llm_client=GeminiClient(model="gemini-2.0-flash"))
+engine = CreativityEngine(config=config)
+```
+
+### Ollama (로컬 LLM — llama3, mistral 등)
+
+```bash
+# Ollama 서버 설치: https://ollama.ai
+pip install "creativity-engine[ollama]"
+```
+
+```python
+from creativity_engine.llm.ollama import OllamaClient
+from creativity_engine import CreativityEngine, EngineConfig
+
+config = EngineConfig(llm_client=OllamaClient(model="llama3.2"))
+engine = CreativityEngine(config=config)
+```
+
+### 커스텀 LLM
+
 ```python
 from creativity_engine.llm.base import BaseLLMClient
 
-class MyOpenAIClient(BaseLLMClient):
+class MyCustomClient(BaseLLMClient):
     def call(self, system: str, user: str, max_tokens: int = 4096) -> str:
-        # OpenAI / Gemini / 로컬 LLM 등
+        # 임의의 LLM API 호출
         ...
 
-config = EngineConfig(llm_client=MyOpenAIClient())
+config = EngineConfig(llm_client=MyCustomClient())
 engine = CreativityEngine(config=config)
 ```
 
