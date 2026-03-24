@@ -22,19 +22,13 @@ _DEFAULT_CONFIDENCE = 0.5
 # ──────────────────────────────────────────────
 
 _FORMATTER_SYSTEM = """\
-당신은 아이디어를 실행 가능한 솔루션으로 정리하는 전문가입니다.
-주어진 아이디어를 바탕으로 구체적이고 실행 가능한 솔루션을 자연어로 작성하세요.
-명확하고 간결하게, 핵심 단계와 기대 효과를 포함하여 작성하세요."""
+ROLE: 아이디어→솔루션 변환기
+구체적·실행가능 솔루션을 핵심단계+기대효과 포함해 작성."""
 
 _FORMATTER_USER = """\
-문제: {goal}
-제약: {constraints}
-
-선택된 아이디어: {idea_content}
-아이디어 근거: {rationale}
-영감 도메인: {source_domains}
-
-위 아이디어를 바탕으로 구체적인 솔루션을 300자 이내로 작성하세요."""
+goal:{goal}|const:{constraints}
+idea:{idea_content}|why:{rationale}|sd:{source_domains}
+→300자 이내 솔루션"""
 
 
 class SolutionFormatter:
@@ -94,26 +88,19 @@ class Executor:
 # ──────────────────────────────────────────────
 
 _REFLECTOR_SYSTEM = """\
-당신은 AI 솔루션의 품질을 객관적으로 평가하는 비평가입니다.
-제시된 솔루션의 강점, 한계, 개선 방향을 간결하게 평가하고
-신뢰도 점수(0.0~1.0)를 제시하세요.
+ROLE: 솔루션 평가 비평가
+ABBREV: ns=novelty_score fs=feasibility_score
+강점·한계·개선방향 간결 평가 + 신뢰도(0.0~1.0) 제시.
 
-출력 형식:
-평가: [솔루션 평가 내용]
-신뢰도: [0.0~1.0 숫자만]"""
+<out>
+평가: [내용]
+신뢰도: [숫자]</out>"""
 
 _REFLECTOR_USER = """\
-문제: {goal}
-제약: {constraints}
-
-솔루션: {solution_text}
-
-선택된 아이디어:
-- 내용: {idea_content}
-- 참신성: {novelty_score}
-- 실현가능성: {feasibility_score}
-
-이 솔루션을 평가하고 신뢰도를 제시하세요."""
+goal:{goal}|const:{constraints}
+sol:{solution_text}
+idea:{idea_content}|ns:{novelty_score}|fs:{feasibility_score}
+→평가+신뢰도"""
 
 
 class Reflector:

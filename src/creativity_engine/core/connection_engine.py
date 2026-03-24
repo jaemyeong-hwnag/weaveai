@@ -89,32 +89,18 @@ def _summarize_knowledge(bundle: InputBundle) -> str:
 # ──────────────────────────────────────────────
 
 _DIVERGENCE_SYSTEM = """\
-당신은 창의적 아이디어 생성 전문가입니다.
-주어진 문제에 대해 {n}개의 서로 다른 아이디어를 생성하세요.
+ROLE: 창의적 아이디어 생성기
+ABBREV: sd=source_domains conn=connections
 
-규칙:
-- 각 아이디어는 완전히 다른 접근 방식을 사용해야 합니다.
-- 실현 가능성을 지금 판단하지 마세요. 일단 생성합니다.
-- 상식적인 것부터 파격적인 것까지 스펙트럼을 넓게 가져가세요.
-- 각 아이디어에 영감을 준 분야(source_domains)를 반드시 명시하세요.
+{n}개 아이디어 생성. 품질판단 금지. 접근법 모두 달라야 함. 상식→파격 스펙트럼. sd 필수.
 
-출력 형식: JSON 배열만 출력 (다른 텍스트 없이)
-[
-  {{
-    "content": "아이디어 내용",
-    "rationale": "왜 이 접근 방식인가",
-    "source_domains": ["분야1", "분야2"],
-    "connections": ["핵심 개념1", "핵심 개념2"]
-  }}
-]"""
+<out>JSON 배열만 (타 텍스트 없이)
+[{{"content":"...","rationale":"...","source_domains":["분야"],"connections":["개념"]}}]</out>"""
 
 _DIVERGENCE_USER = """\
-목표: {goal}
-제약: {constraints}
-컨텍스트: {context_summary}
-참고 지식: {knowledge_summary}
-
-{n}개의 아이디어를 JSON으로 출력하세요."""
+goal:{goal}|const:{constraints}
+ctx:{context_summary}|know:{knowledge_summary}
+→{n}개 JSON"""
 
 
 class DivergenceGenerator:
@@ -138,37 +124,28 @@ class DivergenceGenerator:
 # ──────────────────────────────────────────────
 
 _CROSS_DOMAIN_SYSTEM = """\
-당신은 서로 다른 분야의 패턴을 연결하는 전문가입니다.
-주어진 아이디어 목록을 보고, 서로 다른 도메인 간의 유추(analogy)를 찾아
-기존에 없는 새로운 아이디어를 {n}개 추가로 만들어내세요.
+ROLE: 크로스도메인 연결 전문가
+도메인 간 유추로 새 아이디어 {n}개 생성. source_domains에 연결된 두 도메인 모두 포함.
 
-좋은 크로스도메인 연결의 예시:
-- 군사 전략 → 비즈니스 경쟁 전략
-- 생태계 다양성 → 포트폴리오 관리
-- 게임 디자인 → 교육 동기 부여
-- 생물 면역 시스템 → 사이버보안
-
-출력 형식: JSON 배열만 출력 (다른 텍스트 없이)
-각 아이디어의 source_domains에 연결된 두 도메인을 모두 포함하세요."""
+<ex>군사전략→비즈전략|생태계→포트폴리오|게임디자인→교육동기|면역→사이버보안</ex>
+<out>JSON 배열만 (diverge 스키마 동일)</out>"""
 
 _CROSS_DOMAIN_USER = """\
-문제: {goal}
-제약: {constraints}
-
-기존 아이디어 (참고용):
+goal:{goal}|const:{constraints}
+<ideas>
 {ideas_summary}
-
-약한 신호 (재료):
+</ideas>
+<signals>
 {signals_text}
-
-{n}개의 크로스도메인 아이디어를 JSON으로 출력하세요."""
+</signals>
+→{n}개 크로스도메인 JSON"""
 
 
 class CrossDomainLinker:
     def run(self, bundle: InputBundle, existing_ideas: list[Idea]) -> list[Idea]:
         n = max(3, bundle.problem.divergence_n // 3)
-        ideas_summary = "\n".join(
-            f"- {idea.content} (출처: {idea.source_domains})"
+        ideas_summary = "content|sd\n" + "\n".join(
+            f"{idea.content}|{idea.source_domains}"
             for idea in existing_ideas[:5]
         )
         signals_text = "\n".join(
@@ -193,29 +170,17 @@ class CrossDomainLinker:
 # ──────────────────────────────────────────────
 
 _RELAXER_SYSTEM = """\
-당신은 창의적 제약 해체 전문가입니다.
-주어진 제약 조건들을 하나씩 완화하거나 뒤집어서,
-그 상태에서 가능한 아이디어를 탐색한 후
-원래 제약 안에서 적용 가능한 핵심 인사이트를 추출하세요.
+ROLE: 제약 해체 전문가
+목표: 제약 해제 아님. 해제 시 보이는 가능성 본질 추출 → 원래 제약 안 구현 아이디어 생성.
 
-제약을 "해제하는 것"이 목표가 아닙니다.
-제약을 해제했을 때 보이는 가능성의 본질을 추출하는 것이 목표입니다.
-
-출력 형식: JSON 배열만 출력
-[
-  {{
-    "content": "원래 제약 안에서 구현 가능한 아이디어",
-    "rationale": "이 가정을 해제하면 보이는 것",
-    "source_domains": ["역발상"],
-    "connections": ["완화된 제약 키워드"]
-  }}
-]"""
+<out>JSON 배열만
+[{{"content":"원래 제약 안 아이디어","rationale":"해제 시 인사이트","source_domains":["역발상"],"connections":["키워드"]}}]</out>"""
 
 _RELAXER_USER = """\
-문제: {goal}
-제약 조건들: {constraints}
-
-각 제약을 뒤집어 역발상 아이디어를 생성하세요. JSON으로 출력하세요."""
+goal:{goal}
+const:
+{constraints}
+→역발상 JSON"""
 
 
 class ConstraintRelaxer:
@@ -238,35 +203,25 @@ class ConstraintRelaxer:
 # ──────────────────────────────────────────────
 
 _SCORER_SYSTEM = """\
-다음 아이디어를 두 가지 기준으로 평가하세요.
+ROLE: 아이디어 평가기
+ABBREV: ns=novelty_score(0-1) fs=feasibility_score(0-1)
 
-1. novelty_score (0.0~1.0): 얼마나 참신한가?
-   - 0.0: 누구나 떠올리는 뻔한 해법
-   - 0.5: 알려져 있지만 이 맥락에서는 신선한 적용
-   - 1.0: 이 분야에서 전혀 시도된 적 없는 접근
+<rubric>
+score|ns 기준|fs 기준
+0.0|뻔한 해법|제약위반/불가
+0.5|맥락 신선|도전적 가능
+1.0|전혀 새 접근|즉시 실행
+</rubric>
 
-2. feasibility_score (0.0~1.0): 주어진 제약 안에서 실현 가능한가?
-   - 0.0: 제약 위반 또는 현실 불가능
-   - 0.5: 도전적이지만 가능
-   - 1.0: 즉시 실행 가능
-
-출력: JSON 배열만 출력
-[
-  {{
-    "id": "아이디어 ID",
-    "novelty_score": 0.0~1.0,
-    "feasibility_score": 0.0~1.0
-  }}
-]"""
+<out>JSON 배열만
+[{{"id":"...","novelty_score":0.0,"feasibility_score":0.0}}]</out>"""
 
 _SCORER_USER = """\
-문제: {goal}
-제약: {constraints}
-
-평가할 아이디어:
+goal:{goal}|const:{constraints}
+<ideas>
 {ideas_text}
-
-각 아이디어를 평가해 JSON으로 출력하세요."""
+</ideas>
+→각 아이디어 평가 JSON"""
 
 
 def _calculate_final_score(idea: Idea, weights: dict | None = None) -> float:
@@ -286,8 +241,8 @@ class NoveltyScorer:
         if not ideas:
             return ideas
 
-        ideas_text = "\n".join(
-            f"ID: {idea.id}\n내용: {idea.content}"
+        ideas_text = "id|content\n" + "\n".join(
+            f"{idea.id}|{idea.content}"
             for idea in ideas
         )
         user = _SCORER_USER.format(
