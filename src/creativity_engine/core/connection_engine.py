@@ -2,22 +2,25 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import random
 import re
 from typing import TypedDict
 
-import anthropic
-from dotenv import load_dotenv
 from langgraph.graph import END, StateGraph
 
+from ..config import EngineConfig
+from ..llm.base import BaseLLMClient
+from ..llm.claude import ClaudeClient
 from .models import Idea, IdeaSet, InputBundle
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
-_client = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", ""))
-_MODEL = "claude-sonnet-4-6"
+# 하위 호환을 위해 유지 (외부에서 import 하는 테스트 대응)
+_SERENDIPITY_DOMAINS = [
+    "요리", "음악", "고고학", "우주항공", "패션", "원예", "마술", "스포츠",
+    "신화", "지질학", "해양생물", "건축", "철학", "만화", "의학", "종교",
+    "경제학", "수학", "영화", "곤충학", "기후학", "언어학", "무용", "항해",
+]
 
 
 # ──────────────────────────────────────────────
@@ -30,6 +33,7 @@ class ConnectionState(TypedDict):
     linked_ideas: list[Idea]
     relaxed_ideas: list[Idea]
     serendipity_ideas: list[Idea]
+    extra_ideas: list[Idea]
     all_ideas: list[Idea]
     scored_ideas: list[Idea]
     idea_set: IdeaSet
@@ -45,24 +49,6 @@ def _extract_json(text: str) -> str:
     return match.group(1).strip() if match else text.strip()
 
 
-def _call_claude(system: str, user: str, retries: int = 2) -> str:
-    """Claude API 호출 with 재시도."""
-    for attempt in range(retries + 1):
-        try:
-            response = _client.messages.create(
-                model=_MODEL,
-                max_tokens=4096,
-                system=system,
-                messages=[{"role": "user", "content": user}],
-            )
-            return response.content[0].text
-        except Exception as e:
-            if attempt == retries:
-                raise
-            logger.warning("Claude API attempt %d failed: %s", attempt + 1, e)
-    return ""
-
-
 def _parse_ideas_json(text: str, retries: int = 2) -> list[dict]:
     """JSON 파싱 with 재시도 (코드 펜스 제거 포함)."""
     for attempt in range(retries + 1):
@@ -76,18 +62,18 @@ def _parse_ideas_json(text: str, retries: int = 2) -> list[dict]:
     return []
 
 
-def _summarize_knowledge(bundle: InputBundle) -> str:
-    """지식 문서를 프롬프트용 요약 텍스트로 변환 (최대 3개, 각 500자)."""
+def _summarize_knowledge(bundle: InputBundle, max_docs: int = 3, max_chars: int = 500) -> str:
+    """지식 문서를 프롬프트용 요약 텍스트로 변환."""
     if not bundle.knowledge:
         return "관련 지식 없음"
     parts = []
-    for doc in bundle.knowledge[:3]:
-        parts.append(f"[{doc.source}] {doc.content[:500]}")
+    for doc in bundle.knowledge[:max_docs]:
+        parts.append(f"[{doc.source}] {doc.content[:max_chars]}")
     return "\n".join(parts)
 
 
 # ──────────────────────────────────────────────
-# 1. Divergence Generator
+# Prompt Templates (오버라이드 가능)
 # ──────────────────────────────────────────────
 
 _DIVERGENCE_SYSTEM = """\
@@ -103,27 +89,6 @@ _DIVERGENCE_USER = """\
 goal:{goal}|const:{constraints}
 ctx:{context_summary}|know:{knowledge_summary}
 →{n}개 JSON"""
-
-
-class DivergenceGenerator:
-    def run(self, bundle: InputBundle) -> list[Idea]:
-        n = bundle.problem.divergence_n
-        system = _DIVERGENCE_SYSTEM.format(n=n)
-        user = _DIVERGENCE_USER.format(
-            goal=bundle.problem.goal,
-            constraints=", ".join(bundle.problem.constraints) or "없음",
-            context_summary=bundle.context_summary or "없음",
-            knowledge_summary=_summarize_knowledge(bundle),
-            n=n,
-        )
-        text = _call_claude(system, user)
-        raw = _parse_ideas_json(text)
-        return [Idea(**item) for item in raw if isinstance(item, dict)]
-
-
-# ──────────────────────────────────────────────
-# 2. Cross-domain Linker
-# ──────────────────────────────────────────────
 
 _CROSS_DOMAIN_SYSTEM = """\
 ROLE: 크로스도메인 연결 전문가
@@ -142,35 +107,6 @@ goal:{goal}|const:{constraints}
 </signals>
 →{n}개 크로스도메인 JSON"""
 
-
-class CrossDomainLinker:
-    def run(self, bundle: InputBundle, existing_ideas: list[Idea]) -> list[Idea]:
-        n = max(3, bundle.problem.divergence_n // 3)
-        ideas_summary = "content|sd\n" + "\n".join(
-            f"{idea.content}|{idea.source_domains}"
-            for idea in existing_ideas[:5]
-        )
-        signals_text = "\n".join(
-            f"- [{s.signal_type}] {s.content}" for s in bundle.signals
-        ) or "없음"
-
-        system = _CROSS_DOMAIN_SYSTEM.format(n=n)
-        user = _CROSS_DOMAIN_USER.format(
-            goal=bundle.problem.goal,
-            constraints=", ".join(bundle.problem.constraints) or "없음",
-            ideas_summary=ideas_summary or "없음",
-            signals_text=signals_text,
-            n=n,
-        )
-        text = _call_claude(system, user)
-        raw = _parse_ideas_json(text)
-        return [Idea(**item) for item in raw if isinstance(item, dict)]
-
-
-# ──────────────────────────────────────────────
-# 3. Constraint Relaxer
-# ──────────────────────────────────────────────
-
 _RELAXER_SYSTEM = """\
 ROLE: 제약 해체 전문가
 목표: 제약 해제 아님. 해제 시 보이는 가능성 본질 추출 → 원래 제약 안 구현 아이디어 생성.
@@ -183,33 +119,6 @@ goal:{goal}
 const:
 {constraints}
 →역발상 JSON"""
-
-
-class ConstraintRelaxer:
-    def run(self, bundle: InputBundle) -> list[Idea]:
-        if not bundle.problem.constraints:
-            return []
-
-        system = _RELAXER_SYSTEM
-        user = _RELAXER_USER.format(
-            goal=bundle.problem.goal,
-            constraints="\n".join(f"- {c}" for c in bundle.problem.constraints),
-        )
-        text = _call_claude(system, user)
-        raw = _parse_ideas_json(text)
-        return [Idea(**item) for item in raw if isinstance(item, dict)]
-
-
-# ──────────────────────────────────────────────
-# 4. Serendipity Generator
-# ──────────────────────────────────────────────
-
-# serendipity=0이면 완전 skip. 값이 높을수록 더 무관한 도메인에서 강제 연결.
-_SERENDIPITY_DOMAINS = [
-    "요리", "음악", "고고학", "우주항공", "패션", "원예", "마술", "스포츠",
-    "신화", "지질학", "해양생물", "건축", "철학", "만화", "의학", "종교",
-    "경제학", "수학", "영화", "곤충학", "기후학", "언어학", "무용", "항해",
-]
 
 _SERENDIPITY_SYSTEM = """\
 ROLE: 우연적 아이디어 생성기
@@ -227,49 +136,6 @@ random_domains:{random_domains}
 serendipity:{serendipity}
 
 →위 랜덤 도메인을 문제에 강제 연결해 {n}개 아이디어 JSON"""
-
-
-class SerendipityGenerator:
-    """
-    우연 자극 기반 아이디어 생성기.
-    serendipity=0.0이면 즉시 빈 리스트 반환.
-    serendipity가 높을수록:
-      - 선택 도메인 수 증가 (무관한 도메인 더 많이)
-      - 생성 아이디어 수 증가
-    """
-
-    def run(self, bundle: InputBundle) -> list[Idea]:
-        serendipity = bundle.problem.serendipity
-        if serendipity <= 0.0:
-            return []
-
-        # serendipity 강도에 따라 도메인 수·아이디어 수 결정
-        domain_count = max(1, round(serendipity * 4))   # 0.25→1, 0.5→2, 1.0→4
-        n = max(1, round(serendipity * bundle.problem.divergence_n * 0.4))
-
-        random_domains = random.sample(_SERENDIPITY_DOMAINS, min(domain_count, len(_SERENDIPITY_DOMAINS)))
-
-        system = _SERENDIPITY_SYSTEM
-        user = _SERENDIPITY_USER.format(
-            goal=bundle.problem.goal,
-            constraints=", ".join(bundle.problem.constraints) or "없음",
-            random_domains=", ".join(random_domains),
-            serendipity=serendipity,
-            n=n,
-        )
-        text = _call_claude(system, user)
-        raw = _parse_ideas_json(text)
-        ideas = [Idea(**item) for item in raw if isinstance(item, dict)]
-        logger.info(
-            "SerendipityGenerator(strength=%.2f) domains=%s → %d ideas",
-            serendipity, random_domains, len(ideas),
-        )
-        return ideas
-
-
-# ──────────────────────────────────────────────
-# 5. Novelty Scorer
-# ──────────────────────────────────────────────
 
 _SCORER_SYSTEM = """\
 ROLE: 아이디어 평가기
@@ -292,6 +158,160 @@ goal:{goal}|const:{constraints}
 </ideas>
 →각 아이디어 평가 JSON"""
 
+_PROMPT_DEFAULTS: dict[str, str] = {
+    "diverge": _DIVERGENCE_SYSTEM,
+    "cross_link": _CROSS_DOMAIN_SYSTEM,
+    "relax": _RELAXER_SYSTEM,
+    "serendipity": _SERENDIPITY_SYSTEM,
+    "scorer": _SCORER_SYSTEM,
+}
+
+
+# ──────────────────────────────────────────────
+# 1. Divergence Generator
+# ──────────────────────────────────────────────
+
+class DivergenceGenerator:
+    def __init__(
+        self, client: BaseLLMClient | None = None, config: EngineConfig | None = None
+    ) -> None:
+        cfg = config or EngineConfig()
+        self._client = client or ClaudeClient(model=cfg.model)
+        self._config = cfg
+        self._system = cfg.prompt_overrides.get("diverge", _DIVERGENCE_SYSTEM)
+
+    def run(self, bundle: InputBundle) -> list[Idea]:
+        n = bundle.problem.divergence_n
+        system = self._system.format(n=n)
+        user = _DIVERGENCE_USER.format(
+            goal=bundle.problem.goal,
+            constraints=", ".join(bundle.problem.constraints) or "없음",
+            context_summary=bundle.context_summary or "없음",
+            knowledge_summary=_summarize_knowledge(
+                bundle, self._config.max_knowledge_docs, self._config.max_chars
+            ),
+            n=n,
+        )
+        text = self._client.call(system, user, self._config.connection_max_tokens)
+        raw = _parse_ideas_json(text)
+        return [Idea(**item) for item in raw if isinstance(item, dict)]
+
+
+# ──────────────────────────────────────────────
+# 2. Cross-domain Linker
+# ──────────────────────────────────────────────
+
+class CrossDomainLinker:
+    def __init__(
+        self, client: BaseLLMClient | None = None, config: EngineConfig | None = None
+    ) -> None:
+        cfg = config or EngineConfig()
+        self._client = client or ClaudeClient(model=cfg.model)
+        self._config = cfg
+        self._system_tpl = cfg.prompt_overrides.get("cross_link", _CROSS_DOMAIN_SYSTEM)
+
+    def run(self, bundle: InputBundle, existing_ideas: list[Idea]) -> list[Idea]:
+        n = max(3, bundle.problem.divergence_n // 3)
+        ideas_summary = "content|sd\n" + "\n".join(
+            f"{idea.content}|{idea.source_domains}"
+            for idea in existing_ideas[:5]
+        )
+        signals_text = "\n".join(
+            f"- [{s.signal_type}] {s.content}" for s in bundle.signals
+        ) or "없음"
+
+        system = self._system_tpl.format(n=n)
+        user = _CROSS_DOMAIN_USER.format(
+            goal=bundle.problem.goal,
+            constraints=", ".join(bundle.problem.constraints) or "없음",
+            ideas_summary=ideas_summary or "없음",
+            signals_text=signals_text,
+            n=n,
+        )
+        text = self._client.call(system, user, self._config.connection_max_tokens)
+        raw = _parse_ideas_json(text)
+        return [Idea(**item) for item in raw if isinstance(item, dict)]
+
+
+# ──────────────────────────────────────────────
+# 3. Constraint Relaxer
+# ──────────────────────────────────────────────
+
+class ConstraintRelaxer:
+    def __init__(
+        self, client: BaseLLMClient | None = None, config: EngineConfig | None = None
+    ) -> None:
+        cfg = config or EngineConfig()
+        self._client = client or ClaudeClient(model=cfg.model)
+        self._config = cfg
+        self._system = cfg.prompt_overrides.get("relax", _RELAXER_SYSTEM)
+
+    def run(self, bundle: InputBundle) -> list[Idea]:
+        if not bundle.problem.constraints:
+            return []
+
+        user = _RELAXER_USER.format(
+            goal=bundle.problem.goal,
+            constraints="\n".join(f"- {c}" for c in bundle.problem.constraints),
+        )
+        text = self._client.call(self._system, user, self._config.connection_max_tokens)
+        raw = _parse_ideas_json(text)
+        return [Idea(**item) for item in raw if isinstance(item, dict)]
+
+
+# ──────────────────────────────────────────────
+# 4. Serendipity Generator
+# ──────────────────────────────────────────────
+
+class SerendipityGenerator:
+    """
+    우연 자극 기반 아이디어 생성기.
+    serendipity=0.0이면 즉시 빈 리스트 반환.
+    """
+
+    def __init__(
+        self,
+        client: BaseLLMClient | None = None,
+        config: EngineConfig | None = None,
+    ) -> None:
+        cfg = config or EngineConfig()
+        self._client = client or ClaudeClient(model=cfg.model)
+        self._config = cfg
+        self._system = cfg.prompt_overrides.get("serendipity", _SERENDIPITY_SYSTEM)
+        self._domains = cfg.serendipity_domains
+
+    def run(self, bundle: InputBundle) -> list[Idea]:
+        serendipity = bundle.problem.serendipity
+        if serendipity <= 0.0:
+            return []
+
+        domain_count = max(1, round(serendipity * 4))
+        n = max(1, round(serendipity * bundle.problem.divergence_n * 0.4))
+
+        random_domains = random.sample(
+            self._domains, min(domain_count, len(self._domains))
+        )
+
+        user = _SERENDIPITY_USER.format(
+            goal=bundle.problem.goal,
+            constraints=", ".join(bundle.problem.constraints) or "없음",
+            random_domains=", ".join(random_domains),
+            serendipity=serendipity,
+            n=n,
+        )
+        text = self._client.call(self._system, user, self._config.connection_max_tokens)
+        raw = _parse_ideas_json(text)
+        ideas = [Idea(**item) for item in raw if isinstance(item, dict)]
+        logger.info(
+            "SerendipityGenerator(strength=%.2f) domains=%s → %d ideas",
+            serendipity, random_domains, len(ideas),
+        )
+        return ideas
+
+
+# ──────────────────────────────────────────────
+# 5. Novelty Scorer
+# ──────────────────────────────────────────────
 
 def _calculate_final_score(idea: Idea, weights: dict | None = None) -> float:
     w = weights or {"novelty": 0.6, "feasibility": 0.4}
@@ -300,6 +320,14 @@ def _calculate_final_score(idea: Idea, weights: dict | None = None) -> float:
 
 
 class NoveltyScorer:
+    def __init__(
+        self, client: BaseLLMClient | None = None, config: EngineConfig | None = None
+    ) -> None:
+        cfg = config or EngineConfig()
+        self._client = client or ClaudeClient(model=cfg.model)
+        self._config = cfg
+        self._system = cfg.prompt_overrides.get("scorer", _SCORER_SYSTEM)
+
     def run(
         self,
         ideas: list[Idea],
@@ -310,19 +338,18 @@ class NoveltyScorer:
         if not ideas:
             return ideas
 
+        weights = score_weights or self._config.score_weights
         ideas_text = "id|content\n" + "\n".join(
-            f"{idea.id}|{idea.content}"
-            for idea in ideas
+            f"{idea.id}|{idea.content}" for idea in ideas
         )
         user = _SCORER_USER.format(
             goal=problem_goal,
             constraints=", ".join(problem_constraints) or "없음",
             ideas_text=ideas_text,
         )
-        text = _call_claude(_SCORER_SYSTEM, user)
+        text = self._client.call(self._system, user, self._config.connection_max_tokens)
         raw = _parse_ideas_json(text)
 
-        # id → scores 매핑
         score_map: dict[str, dict] = {}
         for item in raw:
             if isinstance(item, dict) and "id" in item:
@@ -332,13 +359,13 @@ class NoveltyScorer:
             scores = score_map.get(idea.id, {})
             idea.novelty_score = float(scores.get("novelty_score", 0.5))
             idea.feasibility_score = float(scores.get("feasibility_score", 0.5))
-            idea.final_score = _calculate_final_score(idea, score_weights)
+            idea.final_score = _calculate_final_score(idea, weights)
 
         return ideas
 
 
 # ──────────────────────────────────────────────
-# 5. Convergence Ranker
+# 6. Convergence Ranker
 # ──────────────────────────────────────────────
 
 def _diverse_top_k(ideas: list[Idea], k: int) -> list[Idea]:
@@ -359,7 +386,6 @@ def _diverse_top_k(ideas: list[Idea], k: int) -> list[Idea]:
         if is_diverse:
             selected.append(idea)
 
-    # 다양성 기준으로 부족하면 점수 순으로 채움
     if len(selected) < k:
         remaining = [i for i in sorted_ideas if i not in selected]
         selected.extend(remaining[: k - len(selected)])
@@ -382,121 +408,8 @@ class ConvergenceRanker:
             result = sorted_ideas[:top_k]
 
         if len(result) < top_k:
-            logger.warning(
-                "ConvergenceRanker: got %d ideas but top_k=%d", len(result), top_k
-            )
+            logger.warning("ConvergenceRanker: got %d ideas but top_k=%d", len(result), top_k)
         return result
-
-
-# ──────────────────────────────────────────────
-# LangGraph 노드 함수 (모듈 레벨)
-# ──────────────────────────────────────────────
-
-_divergence_gen = DivergenceGenerator()
-_cross_linker = CrossDomainLinker()
-_constraint_relaxer = ConstraintRelaxer()
-_serendipity_gen = SerendipityGenerator()
-_novelty_scorer = NoveltyScorer()
-
-
-def diverge_node(state: ConnectionState) -> dict:
-    bundle = state["bundle"]
-    ideas = _divergence_gen.run(bundle)
-    logger.info("DivergenceGenerator produced %d ideas", len(ideas))
-    return {"diverged_ideas": ideas}
-
-
-def cross_link_node(state: ConnectionState) -> dict:
-    bundle = state["bundle"]
-    existing = state.get("diverged_ideas", [])
-    ideas = _cross_linker.run(bundle, existing)
-    logger.info("CrossDomainLinker produced %d ideas", len(ideas))
-    return {"linked_ideas": ideas}
-
-
-def relax_node(state: ConnectionState) -> dict:
-    bundle = state["bundle"]
-    ideas = _constraint_relaxer.run(bundle)
-    logger.info("ConstraintRelaxer produced %d ideas", len(ideas))
-    return {"relaxed_ideas": ideas}
-
-
-def serendipity_node(state: ConnectionState) -> dict:
-    bundle = state["bundle"]
-    ideas = _serendipity_gen.run(bundle)
-    return {"serendipity_ideas": ideas}
-
-
-def merge_node(state: ConnectionState) -> dict:
-    all_ideas = (
-        state.get("diverged_ideas", [])
-        + state.get("linked_ideas", [])
-        + state.get("relaxed_ideas", [])
-        + state.get("serendipity_ideas", [])
-    )
-    logger.info("merge_node: total %d ideas", len(all_ideas))
-    return {"all_ideas": all_ideas}
-
-
-def score_node(state: ConnectionState) -> dict:
-    bundle = state["bundle"]
-    ideas = state.get("all_ideas", [])
-    scored = _novelty_scorer.run(
-        ideas,
-        problem_goal=bundle.problem.goal,
-        problem_constraints=bundle.problem.constraints,
-    )
-    return {"scored_ideas": scored}
-
-
-def rank_node(state: ConnectionState) -> dict:
-    bundle = state["bundle"]
-    ideas = state.get("scored_ideas", [])
-    ranker = ConvergenceRanker()
-    top_ideas = ranker.run(ideas, top_k=bundle.problem.top_k)
-
-    divergence_log = [
-        f"{idea.source_domains} → {idea.connections}"
-        for idea in ideas
-        if len(idea.source_domains) > 1
-    ]
-
-    idea_set = IdeaSet(
-        problem=bundle.problem,
-        all_ideas=ideas,
-        top_ideas=top_ideas,
-        divergence_log=divergence_log,
-    )
-    return {"idea_set": idea_set}
-
-
-# ──────────────────────────────────────────────
-# Graph Builder
-# ──────────────────────────────────────────────
-
-def build_connection_graph():
-    graph = StateGraph(ConnectionState)
-
-    graph.add_node("diverge", diverge_node)
-    graph.add_node("cross_link", cross_link_node)
-    graph.add_node("relax", relax_node)
-    graph.add_node("serendipity", serendipity_node)
-    graph.add_node("merge", merge_node)
-    graph.add_node("score", score_node)
-    graph.add_node("rank", rank_node)
-
-    graph.set_entry_point("diverge")
-    graph.add_edge("diverge", "cross_link")
-    graph.add_edge("diverge", "relax")
-    graph.add_edge("diverge", "serendipity")  # serendipity=0이면 내부에서 skip
-    graph.add_edge("cross_link", "merge")
-    graph.add_edge("relax", "merge")
-    graph.add_edge("serendipity", "merge")
-    graph.add_edge("merge", "score")
-    graph.add_edge("score", "rank")
-    graph.add_edge("rank", END)
-
-    return graph.compile()
 
 
 # ──────────────────────────────────────────────
@@ -504,15 +417,136 @@ def build_connection_graph():
 # ──────────────────────────────────────────────
 
 class ConnectionEngine:
-    def __init__(
-        self,
-        extra_generators: list = [],
-        score_weights: dict | None = None,
-        use_diverse_ranking: bool = True,
-    ) -> None:
-        self._score_weights = score_weights
-        self._use_diverse_ranking = use_diverse_ranking
-        self._graph = build_connection_graph()
+    """
+    LangGraph 기반 아이디어 생성 파이프라인.
+
+    EngineConfig를 통해 LLM 클라이언트, 활성 제너레이터, 스코어 가중치,
+    우연 도메인 풀, 프롬프트 등을 서비스별로 교체할 수 있음.
+    """
+
+    def __init__(self, config: EngineConfig | None = None) -> None:
+        self._config = config or EngineConfig()
+        self._client = self._config.llm_client or ClaudeClient(model=self._config.model)
+
+        # 제너레이터 인스턴스 생성 (DI)
+        self._divergence_gen = DivergenceGenerator(self._client, self._config)
+        self._cross_linker = CrossDomainLinker(self._client, self._config)
+        self._constraint_relaxer = ConstraintRelaxer(self._client, self._config)
+        self._serendipity_gen = SerendipityGenerator(self._client, self._config)
+        self._novelty_scorer = NoveltyScorer(self._client, self._config)
+        self._ranker = ConvergenceRanker(self._config.use_diverse_ranking)
+
+        self._graph = self._build_graph()
+
+    def _build_graph(self):
+        enabled = set(self._config.enabled_generators)
+        extra = self._config.extra_generators
+
+        graph = StateGraph(ConnectionState)
+
+        # ── 노드 클로저 (self 캡처) ──
+        def diverge_node(state: ConnectionState) -> dict:
+            ideas = self._divergence_gen.run(state["bundle"])
+            logger.info("DivergenceGenerator produced %d ideas", len(ideas))
+            return {"diverged_ideas": ideas}
+
+        def cross_link_node(state: ConnectionState) -> dict:
+            ideas = self._cross_linker.run(
+                state["bundle"], state.get("diverged_ideas", [])
+            )
+            logger.info("CrossDomainLinker produced %d ideas", len(ideas))
+            return {"linked_ideas": ideas}
+
+        def relax_node(state: ConnectionState) -> dict:
+            ideas = self._constraint_relaxer.run(state["bundle"])
+            logger.info("ConstraintRelaxer produced %d ideas", len(ideas))
+            return {"relaxed_ideas": ideas}
+
+        def serendipity_node(state: ConnectionState) -> dict:
+            ideas = self._serendipity_gen.run(state["bundle"])
+            return {"serendipity_ideas": ideas}
+
+        def extra_node(state: ConnectionState) -> dict:
+            if not extra:
+                return {"extra_ideas": []}
+            all_extra: list[Idea] = []
+            for gen in extra:
+                try:
+                    all_extra.extend(gen.run(state["bundle"]))
+                except Exception as e:
+                    logger.warning("extra_generator %s failed: %s", gen, e)
+            return {"extra_ideas": all_extra}
+
+        def merge_node(state: ConnectionState) -> dict:
+            all_ideas = (
+                state.get("diverged_ideas", [])
+                + state.get("linked_ideas", [])
+                + state.get("relaxed_ideas", [])
+                + state.get("serendipity_ideas", [])
+                + state.get("extra_ideas", [])
+            )
+            logger.info("merge_node: total %d ideas", len(all_ideas))
+            return {"all_ideas": all_ideas}
+
+        def score_node(state: ConnectionState) -> dict:
+            bundle = state["bundle"]
+            scored = self._novelty_scorer.run(
+                state.get("all_ideas", []),
+                problem_goal=bundle.problem.goal,
+                problem_constraints=bundle.problem.constraints,
+            )
+            return {"scored_ideas": scored}
+
+        def rank_node(state: ConnectionState) -> dict:
+            bundle = state["bundle"]
+            ideas = state.get("scored_ideas", [])
+            top_ideas = self._ranker.run(ideas, top_k=bundle.problem.top_k)
+
+            divergence_log = [
+                f"{idea.source_domains} → {idea.connections}"
+                for idea in ideas
+                if len(idea.source_domains) > 1
+            ]
+            idea_set = IdeaSet(
+                problem=bundle.problem,
+                all_ideas=ideas,
+                top_ideas=top_ideas,
+                divergence_log=divergence_log,
+            )
+            return {"idea_set": idea_set}
+
+        # ── 노드 등록 ──
+        graph.add_node("diverge", diverge_node)
+        if "cross_link" in enabled:
+            graph.add_node("cross_link", cross_link_node)
+        if "relax" in enabled:
+            graph.add_node("relax", relax_node)
+        if "serendipity" in enabled:
+            graph.add_node("serendipity", serendipity_node)
+        if extra:
+            graph.add_node("extra", extra_node)
+        graph.add_node("merge", merge_node)
+        graph.add_node("score", score_node)
+        graph.add_node("rank", rank_node)
+
+        # ── 엣지 연결 ──
+        graph.set_entry_point("diverge")
+        for name in ("cross_link", "relax", "serendipity"):
+            if name in enabled:
+                graph.add_edge("diverge", name)
+                graph.add_edge(name, "merge")
+        if extra:
+            graph.add_edge("diverge", "extra")
+            graph.add_edge("extra", "merge")
+        # diverge → merge 직접 연결 (다른 노드 없을 때 대비)
+        if not (enabled & {"cross_link", "relax", "serendipity"}) and not extra:
+            graph.add_edge("diverge", "merge")
+
+        graph.add_edge("merge", "score")
+        graph.add_edge("score", "rank")
+        graph.add_edge("rank", END)
+
+        return graph.compile()
 
     def run(self, bundle: InputBundle) -> IdeaSet:
         initial_state: ConnectionState = {
@@ -521,6 +555,7 @@ class ConnectionEngine:
             "linked_ideas": [],
             "relaxed_ideas": [],
             "serendipity_ideas": [],
+            "extra_ideas": [],
             "all_ideas": [],
             "scored_ideas": [],
             "idea_set": IdeaSet(problem=bundle.problem),

@@ -1,4 +1,6 @@
 from .engine import CreativityEngine
+from .config import EngineConfig, DEFAULT_SERENDIPITY_DOMAINS, DEFAULT_GENERATORS
+from .llm import BaseLLMClient, ClaudeClient
 from .adapters import (
     DomainAdapter,
     GeneralAdapter,
@@ -23,6 +25,13 @@ from .core.models import (
 __all__ = [
     # Engine
     "CreativityEngine",
+    # Config
+    "EngineConfig",
+    "DEFAULT_SERENDIPITY_DOMAINS",
+    "DEFAULT_GENERATORS",
+    # LLM
+    "BaseLLMClient",
+    "ClaudeClient",
     # Adapters
     "DomainAdapter",
     "GeneralAdapter",

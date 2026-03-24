@@ -2,21 +2,16 @@ from __future__ import annotations
 
 import logging
 
+from ..config import EngineConfig
 from ..core.models import CreativityProblem, Document, InputBundle, Signal
 from ..tools.retriever import KnowledgeRetriever
 from ..tools.web_search import WebSearchTool
 
 logger = logging.getLogger(__name__)
 
-_MAX_KNOWLEDGE_DOCS = 3
-_MAX_CHARS = 500
-
 
 class ContextBuilder:
-    """
-    CreativityProblem → LLM 프롬프트 삽입용 요약 텍스트 변환.
-    Claude API 호출 없음. 순수 문자열 포맷팅.
-    """
+    """CreativityProblem → LLM 프롬프트용 요약 텍스트 변환. API 호출 없음."""
 
     def build(self, problem: CreativityProblem) -> str:
         lines = [f"목표: {problem.goal}"]
@@ -35,10 +30,7 @@ class ContextBuilder:
 
 
 class SignalCollector:
-    """
-    Tavily 웹 검색으로 엣지케이스·트렌드 신호 수집.
-    실패 시 빈 리스트 반환.
-    """
+    """Tavily 웹 검색으로 엣지케이스·트렌드 신호 수집. 실패 시 빈 리스트 반환."""
 
     def __init__(self) -> None:
         self._search = WebSearchTool()
@@ -49,7 +41,6 @@ class SignalCollector:
                 query=problem.goal,
                 max_results=5,
             )
-            # 제약 조건을 counter_example 신호로 추가
             for constraint in problem.constraints[:2]:
                 signals.append(Signal(
                     content=f"제약 조건: {constraint}",
@@ -64,11 +55,12 @@ class SignalCollector:
 
 class InputEngine:
     """
-    Input Engine: CreativityProblem → InputBundle
-    모든 컴포넌트 실패 시 빈 InputBundle 반환 (전체 파이프라인 중단 없음).
+    Input Engine: CreativityProblem → InputBundle.
+    모든 컴포넌트 실패 시 빈 InputBundle 반환 (파이프라인 중단 없음).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: EngineConfig | None = None) -> None:
+        self._config = config or EngineConfig()
         self._retriever = KnowledgeRetriever()
         self._context_builder = ContextBuilder()
         self._signal_collector = SignalCollector()
@@ -78,23 +70,20 @@ class InputEngine:
         context_summary: str = ""
         signals: list[Signal] = []
 
-        # 1. Knowledge Retrieval
         try:
             knowledge = self._retriever.retrieve(
                 query=problem.goal,
-                top_k=_MAX_KNOWLEDGE_DOCS,
+                top_k=self._config.max_knowledge_docs,
             )
         except Exception as e:
             logger.warning("KnowledgeRetriever failed: %s", e)
 
-        # 2. Context Building
         try:
             context_summary = self._context_builder.build(problem)
         except Exception as e:
             logger.warning("ContextBuilder failed: %s", e)
             context_summary = problem.goal
 
-        # 3. Signal Collection
         try:
             signals = self._signal_collector.collect(problem)
         except Exception as e:
