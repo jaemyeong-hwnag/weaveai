@@ -6,6 +6,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 import pytest
+from creativity_engine.llm.base import BaseLLMClient
 from creativity_engine.core.models import (
     CreativityProblem,
     Document,
@@ -17,6 +18,27 @@ from creativity_engine.core.models import (
     Action,
     ActionType,
 )
+
+
+class MockLLMClient(BaseLLMClient):
+    """테스트용 LLM 클라이언트. call() 반환값을 직접 설정 가능."""
+
+    def __init__(self, return_value: str = "[]") -> None:
+        self._return_value = return_value
+        self.calls: list[tuple[str, str]] = []
+
+    def set_return(self, value: str) -> None:
+        self._return_value = value
+
+    def call(self, system: str, user: str, max_tokens: int = 4096) -> str:
+        self.calls.append((system, user))
+        return self._return_value
+
+
+@pytest.fixture
+def mock_llm():
+    """기본 MockLLMClient 픽스처."""
+    return MockLLMClient()
 
 
 @pytest.fixture

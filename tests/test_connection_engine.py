@@ -1,9 +1,10 @@
-"""connection_engine 단위 테스트 — Claude API mock."""
+"""connection_engine 단위 테스트 — MockLLMClient 주입."""
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
+from creativity_engine.config import EngineConfig
 from creativity_engine.core.connection_engine import (
     ConstraintRelaxer,
     ConvergenceRanker,
@@ -83,12 +84,11 @@ class TestDiverseTopK:
     def test_prefers_diverse_domains(self):
         ideas = [
             Idea(content="A", source_domains=["심리학"], final_score=0.9),
-            Idea(content="B", source_domains=["심리학"], final_score=0.8),  # 중복 도메인
-            Idea(content="C", source_domains=["게임디자인"], final_score=0.7),  # 다른 도메인
+            Idea(content="B", source_domains=["심리학"], final_score=0.8),
+            Idea(content="C", source_domains=["게임디자인"], final_score=0.7),
         ]
         result = _diverse_top_k(ideas, k=2)
         contents = [i.content for i in result]
-        # A(1위)와 C(다른 도메인)가 선택되어야 함
         assert "A" in contents
         assert "C" in contents
 
@@ -98,67 +98,52 @@ class TestDiverseTopK:
             Idea(content="B", source_domains=["심리학"], final_score=0.8),
         ]
         result = _diverse_top_k(ideas, k=2)
-        assert len(result) == 2  # 부족해도 채워야 함
+        assert len(result) == 2
 
 
-# ── Component 테스트 (Claude API mock) ──────────────────
+# ── Component 테스트 (MockLLMClient 주입) ──────────────
 
 MOCK_IDEAS_JSON = json.dumps([
     {"content": "아이디어1", "rationale": "이유1", "source_domains": ["심리학"], "connections": ["집중력"]},
     {"content": "아이디어2", "rationale": "이유2", "source_domains": ["게임"], "connections": ["보상"]},
 ])
 
-MOCK_SCORE_JSON = json.dumps([
-    {"id": "PLACEHOLDER", "novelty_score": 0.7, "feasibility_score": 0.8},
-])
-
-
-def _make_mock_response(text: str):
-    mock = MagicMock()
-    mock.content = [MagicMock(text=text)]
-    return mock
-
 
 class TestDivergenceGenerator:
-    def test_run_returns_ideas(self, sample_bundle):
-        with patch("creativity_engine.core.connection_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response(MOCK_IDEAS_JSON)
-            gen = DivergenceGenerator()
-            ideas = gen.run(sample_bundle)
+    def test_run_returns_ideas(self, sample_bundle, mock_llm):
+        mock_llm.set_return(MOCK_IDEAS_JSON)
+        gen = DivergenceGenerator(client=mock_llm)
+        ideas = gen.run(sample_bundle)
         assert len(ideas) == 2
         assert ideas[0].content == "아이디어1"
         assert ideas[0].source_domains == ["심리학"]
 
-    def test_run_handles_json_parse_error(self, sample_bundle):
-        with patch("creativity_engine.core.connection_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response("not json")
-            gen = DivergenceGenerator()
-            ideas = gen.run(sample_bundle)
+    def test_run_handles_json_parse_error(self, sample_bundle, mock_llm):
+        mock_llm.set_return("not json")
+        gen = DivergenceGenerator(client=mock_llm)
+        ideas = gen.run(sample_bundle)
         assert ideas == []
 
 
 class TestCrossDomainLinker:
-    def test_run_returns_ideas(self, sample_bundle, sample_ideas):
-        with patch("creativity_engine.core.connection_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response(MOCK_IDEAS_JSON)
-            linker = CrossDomainLinker()
-            ideas = linker.run(sample_bundle, sample_ideas)
+    def test_run_returns_ideas(self, sample_bundle, sample_ideas, mock_llm):
+        mock_llm.set_return(MOCK_IDEAS_JSON)
+        linker = CrossDomainLinker(client=mock_llm)
+        ideas = linker.run(sample_bundle, sample_ideas)
         assert len(ideas) >= 1
 
-    def test_run_with_empty_existing(self, sample_bundle):
-        with patch("creativity_engine.core.connection_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response(MOCK_IDEAS_JSON)
-            linker = CrossDomainLinker()
-            ideas = linker.run(sample_bundle, [])
+    def test_run_with_empty_existing(self, sample_bundle, mock_llm):
+        mock_llm.set_return(MOCK_IDEAS_JSON)
+        linker = CrossDomainLinker(client=mock_llm)
+        ideas = linker.run(sample_bundle, [])
         assert isinstance(ideas, list)
 
 
 class TestConstraintRelaxer:
-    def test_run_returns_ideas(self, sample_bundle):
-        with patch("creativity_engine.core.connection_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response(MOCK_IDEAS_JSON)
-            relaxer = ConstraintRelaxer()
-            ideas = relaxer.run(sample_bundle)
+    def test_run_returns_ideas(self, sample_bundle, mock_llm):
+        mock_llm.set_return(MOCK_IDEAS_JSON)
+        relaxer = ConstraintRelaxer(client=mock_llm)
+        ideas = relaxer.run(sample_bundle)
         assert isinstance(ideas, list)
 
     def test_run_with_no_constraints(self, basic_problem):
@@ -167,20 +152,19 @@ class TestConstraintRelaxer:
         )
         relaxer = ConstraintRelaxer()
         ideas = relaxer.run(no_constraint_bundle)
-        assert ideas == []  # 제약 없으면 빈 리스트
+        assert ideas == []
 
 
 class TestNoveltyScorer:
     def test_scores_assigned(self, sample_ideas, basic_problem):
-        # 실제 ID로 mock score 생성
         mock_scores = json.dumps([
             {"id": idea.id, "novelty_score": 0.7, "feasibility_score": 0.6}
             for idea in sample_ideas
         ])
-        with patch("creativity_engine.core.connection_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response(mock_scores)
-            scorer = NoveltyScorer()
-            scored = scorer.run(sample_ideas, basic_problem.goal, basic_problem.constraints)
+        from tests.conftest import MockLLMClient
+        mock_llm = MockLLMClient(mock_scores)
+        scorer = NoveltyScorer(client=mock_llm)
+        scored = scorer.run(sample_ideas, basic_problem.goal, basic_problem.constraints)
 
         for idea in scored:
             assert idea.novelty_score == pytest.approx(0.7)
@@ -223,12 +207,11 @@ class TestConnectionEngine:
             {"content": f"아이디어{i}", "rationale": "이유", "source_domains": [f"도메인{i}"], "connections": []}
             for i in range(3)
         ])
-        mock_scores_json = json.dumps([])  # 스코어 없으면 default 0.5
-
-        with patch("creativity_engine.core.connection_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response(mock_ideas_json)
-            engine = ConnectionEngine()
-            idea_set = engine.run(sample_bundle)
+        from tests.conftest import MockLLMClient
+        mock_llm = MockLLMClient(mock_ideas_json)
+        config = EngineConfig(llm_client=mock_llm)
+        engine = ConnectionEngine(config=config)
+        idea_set = engine.run(sample_bundle)
 
         assert isinstance(idea_set, IdeaSet)
         assert len(idea_set.all_ideas) > 0

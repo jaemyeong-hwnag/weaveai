@@ -1,8 +1,7 @@
-"""output_engine 단위 테스트 — Claude API mock."""
-from unittest.mock import MagicMock, patch
-
+"""output_engine 단위 테스트 — MockLLMClient 주입."""
 import pytest
 
+from creativity_engine.config import EngineConfig
 from creativity_engine.core.output_engine import (
     Executor,
     OutputEngine,
@@ -10,13 +9,7 @@ from creativity_engine.core.output_engine import (
     SolutionFormatter,
     _parse_reflection,
 )
-from creativity_engine.core.models import Action, ActionType, Solution
-
-
-def _make_mock_response(text: str):
-    mock = MagicMock()
-    mock.content = [MagicMock(text=text)]
-    return mock
+from creativity_engine.core.models import Action, ActionType, IdeaSet, Solution
 
 
 class TestParseReflection:
@@ -36,26 +29,27 @@ class TestParseReflection:
 
 
 class TestSolutionFormatter:
-    def test_format_returns_tuple(self, sample_idea_set):
-        with patch("creativity_engine.core.output_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response("생성된 솔루션 텍스트")
-            formatter = SolutionFormatter()
-            selected, text = formatter.format(sample_idea_set)
+    def test_format_returns_tuple(self, sample_idea_set, mock_llm):
+        mock_llm.set_return("생성된 솔루션 텍스트")
+        formatter = SolutionFormatter(client=mock_llm)
+        selected, text = formatter.format(sample_idea_set)
 
         assert selected.content == sample_idea_set.top_ideas[0].content
         assert text == "생성된 솔루션 텍스트"
 
     def test_format_fallback_on_api_error(self, sample_idea_set):
-        with patch("creativity_engine.core.output_engine._client") as mock_client:
-            mock_client.messages.create.side_effect = Exception("API 오류")
-            formatter = SolutionFormatter()
-            selected, text = formatter.format(sample_idea_set)
+        from unittest.mock import MagicMock
+        from creativity_engine.llm.base import BaseLLMClient
 
-        # API 실패 시 idea content 그대로 사용
+        class ErrorClient(BaseLLMClient):
+            def call(self, system, user, max_tokens=4096):
+                raise Exception("API 오류")
+
+        formatter = SolutionFormatter(client=ErrorClient())
+        selected, text = formatter.format(sample_idea_set)
         assert text == sample_idea_set.top_ideas[0].content
 
     def test_format_empty_idea_set(self, basic_problem):
-        from creativity_engine.core.models import IdeaSet
         empty_set = IdeaSet(problem=basic_problem)
         formatter = SolutionFormatter()
         selected, text = formatter.format(empty_set)
@@ -99,43 +93,42 @@ class TestReflector:
         assert reflection is None
         assert confidence == 0.5
 
-    def test_reflect_returns_text_and_confidence(self, sample_idea, sample_idea_set):
-        with patch("creativity_engine.core.output_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response(
-                "평가: 좋은 솔루션\n신뢰도: 0.8"
-            )
-            reflector = Reflector()
-            reflection, confidence = reflector.reflect(
-                solution_text="솔루션",
-                selected_idea=sample_idea,
-                idea_set=sample_idea_set,
-                rounds=1,
-            )
+    def test_reflect_returns_text_and_confidence(self, sample_idea, sample_idea_set, mock_llm):
+        mock_llm.set_return("평가: 좋은 솔루션\n신뢰도: 0.8")
+        reflector = Reflector(client=mock_llm)
+        reflection, confidence = reflector.reflect(
+            solution_text="솔루션",
+            selected_idea=sample_idea,
+            idea_set=sample_idea_set,
+            rounds=1,
+        )
         assert reflection is not None
         assert confidence == pytest.approx(0.8)
 
     def test_reflect_returns_default_on_error(self, sample_idea, sample_idea_set):
-        with patch("creativity_engine.core.output_engine._client") as mock_client:
-            mock_client.messages.create.side_effect = Exception("API 오류")
-            reflector = Reflector()
-            reflection, confidence = reflector.reflect(
-                solution_text="솔루션",
-                selected_idea=sample_idea,
-                idea_set=sample_idea_set,
-                rounds=1,
-            )
+        from creativity_engine.llm.base import BaseLLMClient
+
+        class ErrorClient(BaseLLMClient):
+            def call(self, system, user, max_tokens=4096):
+                raise Exception("API 오류")
+
+        reflector = Reflector(client=ErrorClient())
+        reflection, confidence = reflector.reflect(
+            solution_text="솔루션",
+            selected_idea=sample_idea,
+            idea_set=sample_idea_set,
+            rounds=1,
+        )
         assert reflection is None
         assert confidence == 0.5
 
 
 class TestOutputEngine:
-    def test_run_returns_solution(self, sample_idea_set):
-        with patch("creativity_engine.core.output_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response(
-                "평가: 좋은 솔루션\n신뢰도: 0.75"
-            )
-            engine = OutputEngine()
-            solution = engine.run(sample_idea_set)
+    def test_run_returns_solution(self, sample_idea_set, mock_llm):
+        mock_llm.set_return("평가: 좋은 솔루션\n신뢰도: 0.75")
+        config = EngineConfig(llm_client=mock_llm)
+        engine = OutputEngine(config=config)
+        solution = engine.run(sample_idea_set)
 
         assert isinstance(solution, Solution)
         assert solution.confidence >= 0.0
@@ -143,25 +136,24 @@ class TestOutputEngine:
         assert solution.solution_text is not None
         assert solution.selected_idea is not None
 
-    def test_run_zero_reflection_rounds(self, basic_problem, sample_idea_set):
+    def test_run_zero_reflection_rounds(self, basic_problem, sample_idea_set, mock_llm):
         no_reflection_problem = basic_problem.model_copy(update={"max_reflection_rounds": 0})
-        from creativity_engine.core.models import IdeaSet
         idea_set = sample_idea_set.model_copy(update={"problem": no_reflection_problem})
 
-        with patch("creativity_engine.core.output_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response("솔루션 텍스트")
-            engine = OutputEngine()
-            solution = engine.run(idea_set)
+        mock_llm.set_return("솔루션 텍스트")
+        config = EngineConfig(llm_client=mock_llm)
+        engine = OutputEngine(config=config)
+        solution = engine.run(idea_set)
 
         assert solution.reflection is None
         assert solution.reflection_rounds == 0
-        assert solution.confidence == 0.5  # default
+        assert solution.confidence == 0.5
 
-    def test_solution_has_actions(self, sample_idea_set):
-        with patch("creativity_engine.core.output_engine._client") as mock_client:
-            mock_client.messages.create.return_value = _make_mock_response("솔루션")
-            engine = OutputEngine()
-            solution = engine.run(sample_idea_set)
+    def test_solution_has_actions(self, sample_idea_set, mock_llm):
+        mock_llm.set_return("솔루션")
+        config = EngineConfig(llm_client=mock_llm)
+        engine = OutputEngine(config=config)
+        solution = engine.run(sample_idea_set)
 
         assert len(solution.actions) > 0
         assert solution.actions[0].type == ActionType.TEXT
