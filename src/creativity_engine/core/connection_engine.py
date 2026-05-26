@@ -49,12 +49,25 @@ def _extract_json(text: str) -> str:
     return match.group(1).strip() if match else text.strip()
 
 
+def _normalize_idea_dict(item: dict) -> dict:
+    """AI가 content 대신 title 등 다른 키를 반환하는 경우를 정규화한다."""
+    if "content" not in item:
+        for alt in ("title", "idea", "description", "text"):
+            if alt in item:
+                item = {**item, "content": item[alt]}
+                break
+    return item
+
+
 def _parse_ideas_json(text: str, retries: int = 2) -> list[dict]:
     """JSON 파싱 with 재시도 (코드 펜스 제거 포함)."""
     for attempt in range(retries + 1):
         try:
             cleaned = _extract_json(text)
-            return json.loads(cleaned)
+            raw = json.loads(cleaned)
+            if isinstance(raw, list):
+                return [_normalize_idea_dict(item) for item in raw if isinstance(item, dict)]
+            return []
         except json.JSONDecodeError:
             if attempt == retries:
                 logger.error("JSON parse failed after %d attempts: %s", retries + 1, text[:200])
@@ -95,7 +108,8 @@ ROLE: 크로스도메인 연결 전문가
 도메인 간 유추로 새 아이디어 {n}개 생성. source_domains에 연결된 두 도메인 모두 포함.
 
 <ex>군사전략→비즈전략|생태계→포트폴리오|게임디자인→교육동기|면역→사이버보안</ex>
-<out>JSON 배열만 (diverge 스키마 동일)</out>"""
+<out>JSON 배열만. 반드시 "content" 키 사용 ("title" 금지):
+[{{"content":"...","rationale":"...","source_domains":["도메인A","도메인B"],"connections":["연결개념"]}}]</out>"""
 
 _CROSS_DOMAIN_USER = """\
 goal:{goal}|const:{constraints}
